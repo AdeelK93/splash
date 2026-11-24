@@ -423,6 +423,8 @@ bool moeInt8Experts(const MoeShape &shape, std::span<const BlockMoeWeights *cons
   });
 }
 
+constexpr uint64_t kMmaRoutesPerExpert = 6;
+
 // Every GPU runs the experts on the staged tile: against the register tile, a
 // 35B-shaped layer takes 16-42% less time on a 10-core M4 at one to four
 // decode lanes of random routes; Apple9 GPUs of 11 to 40 cores are
@@ -478,7 +480,12 @@ MoeConfig selectMoe(const KernelCalibration &calibration, Int8Activations int8Ac
   config.ggufRouterTile = selectFloatTile(calibration, rows, shape.experts, routerFormat);
   config.int8Passes = shape.int8Experts && int8PrefillPaths(calibration, int8Activations, step) &&
                       rows > kMaximumDecodeTileRows && routes >= uint64_t{kInt8PassRoutesPerExpert} * shape.experts;
-  config.expertTile = routes <= shape.experts ? MoeExpertTile::M8
+  // Apple7/8's MMA tiles keep 8 rows while routes average up to 6 an expert:
+  // Inkling-2-Mini's prefill of 24 rows took 96.8 ms on 8-row tiles against
+  // 110.0 on 32-row ones on an M1 Max, of 96 rows 264.3 against 265.6, and of
+  // 112 rows 292.4 against 288.6.
+  const uint64_t perExpert = calibration.simdgroupMma ? kMmaRoutesPerExpert : 1;
+  config.expertTile = routes <= perExpert * shape.experts ? MoeExpertTile::M8
                       : step == StepKind::Prefill && !config.int8Passes &&
                               routes >= uint64_t{calibration.moe.wideTileRoutes} * shape.experts
                           ? MoeExpertTile::M64
